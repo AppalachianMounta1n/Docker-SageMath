@@ -1,5 +1,6 @@
-#Single-stage build for SageMath with Jupyter
-FROM archlinux:latest
+#Multi-stage build for SageMath with Jupyter
+#Build stage
+FROM archlinux:latest as builder
 
 #Install essential packages and AUR helper
 RUN pacman -Syyu --noconfirm && \
@@ -53,8 +54,17 @@ RUN python -m venv /home/builduser/sage-env && \
         && \
     /home/builduser/sage-env/bin/jupyter lab build
 
-#Switch back to root for user setup
-USER root
+#Runtime stage
+FROM archlinux:latest
+
+#Install runtime dependencies only
+RUN pacman -Syyu --noconfirm && \
+    pacman -S --noconfirm \
+        python \
+        git \
+        sudo \
+        && \
+    pacman -Scc --noconfirm
 
 #Create non-root user
 RUN useradd -m -s /bin/bash sageuser
@@ -68,34 +78,34 @@ RUN mkdir -p /home/sageuser/notebooks && \
     chmod 755 /home/sageuser && \
     chmod 700 /home/sageuser/notebooks
 
-#Copy virtual environment to sageuser
-RUN cp -r /home/builduser/sage-env /home/sageuser/ && \
-    chown -R sageuser:sageuser /home/sageuser/sage-env
+#Copy SageMath and virtual environment from builder stage
+COPY --from=builder /usr/bin/sage /usr/bin/sage
+COPY --from=builder /usr/share/sage* /usr/share/
+COPY --from=builder /usr/lib/sage* /usr/lib/
+COPY --from=builder /home/builduser/.local /home/sageuser/.local
+COPY --from=builder /home/builduser/.jupyter /home/sageuser/.jupyter
+COPY --from=builder /home/builduser/sage-env /home/sageuser/sage-env
+
+#Fix permissions and shebang paths
+RUN chown -R sageuser:sageuser /home/sageuser/sage-env && \
+    chmod +x /home/sageuser/sage-env/bin/* && \
+    sed -i 's|/home/builduser/sage-env/bin/python|/home/sageuser/sage-env/bin/python|g' /home/sageuser/sage-env/bin/*
 
 #Switch to non-root user
 USER sageuser
 
-#Configure Jupyter security
-RUN /home/sageuser/sage-env/bin/jupyter notebook --generate-config && \
-    echo "c.NotebookApp.ip = '0.0.0.0'" >> /home/sageuser/.jupyter/jupyter_notebook_config.py && \
-    echo "c.NotebookApp.port = 8888" >> /home/sageuser/.jupyter/jupyter_notebook_config.py && \
-    echo "c.NotebookApp.open_browser = False" >> /home/sageuser/.jupyter/jupyter_notebook_config.py && \
-    echo "c.NotebookApp.allow_root = False" >> /home/sageuser/.jupyter/jupyter_notebook_config.py && \
-    echo "c.NotebookApp.token = ''" >> /home/sageuser/.jupyter/jupyter_notebook_config.py && \
-    echo "c.NotebookApp.password = ''" >> /home/sageuser/.jupyter/jupyter_notebook_config.py
-
 #Create startup script for auto-mounting and Jupyter launch
 RUN echo '#!/bin/bash' > /home/sageuser/startup.sh && \
-    echo 'if [ -d "/workspace" ]; then' >> /home/sageuser/startup.sh && \
-    echo '    echo "Auto-mounting /workspace to notebooks directory..."' >> /home/sageuser/startup.sh && \
-    echo '    ln -sf /workspace /home/sageuser/notebooks/workspace' >> /home/sageuser/startup.sh && \
-    echo '    echo "Workspace mounted at /home/sageuser/notebooks/workspace"' >> /home/sageuser/startup.sh && \
+    echo 'if [ -d "/data" ]; then' >> /home/sageuser/startup.sh && \
+    echo '    echo "Auto-mounting /data to notebooks directory..."' >> /home/sageuser/startup.sh && \
+    echo '    ln -sf /data /home/sageuser/notebooks/data' >> /home/sageuser/startup.sh && \
+    echo '    echo "Data mounted at /home/sageuser/notebooks/data"' >> /home/sageuser/startup.sh && \
     echo 'fi' >> /home/sageuser/startup.sh && \
     echo 'echo "Activating Python virtual environment..."' >> /home/sageuser/startup.sh && \
     echo 'source /home/sageuser/sage-env/bin/activate' >> /home/sageuser/startup.sh && \
     echo 'echo "Python virtual environment activated. You can now use pip install in notebooks."' >> /home/sageuser/startup.sh && \
     echo 'echo "Starting Jupyter Lab..."' >> /home/sageuser/startup.sh && \
-    echo 'exec jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root' >> /home/sageuser/startup.sh && \
+    echo 'exec /home/sageuser/sage-env/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root' >> /home/sageuser/startup.sh && \
     chmod +x /home/sageuser/startup.sh
 
 #Expose port for Jupyter
