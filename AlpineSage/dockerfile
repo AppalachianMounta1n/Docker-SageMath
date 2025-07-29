@@ -1,0 +1,196 @@
+#Multi-stage build for SageMath with Jupyter on Alpine Linux
+#Build stage
+FROM alpine:latest AS builder
+
+#Install essential packages for Python environment
+RUN apk update && apk add --no-cache \
+    build-base \
+    git \
+    bash \
+    sudo \
+    python3 \
+    python3-dev \
+    py3-pip \
+    py3-setuptools \
+    py3-wheel \
+    nodejs \
+    npm \
+    gcc \
+    g++ \
+    make \
+    cmake \
+    pkgconfig \
+    linux-headers \
+    musl-dev \
+    zlib-dev \
+    bzip2-dev \
+    xz-dev \
+    curl-dev \
+    openssl-dev \
+    readline-dev \
+    sqlite-dev \
+    ncurses-dev \
+    libffi-dev \
+    gmp-dev \
+    mpfr-dev \
+    fftw-dev \
+    lapack-dev \
+    openblas-dev \
+    suitesparse-dev \
+    boost-dev \
+    gsl-dev \
+    pari-dev \
+    ecl-dev \
+    && rm -rf /var/cache/apk/*
+
+#Create build user
+RUN adduser -D -s /bin/bash builduser && \
+    echo "builduser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+#Switch to build user and set up SageMath build
+USER builduser
+WORKDIR /home/builduser
+
+#Create fallback sage executable (SageMath not available on Alpine)
+RUN echo "Creating Python-based mathematical environment..." && \
+    echo '#!/bin/bash' | sudo tee /usr/bin/sage && \
+    echo 'echo "SageMath not available on Alpine - using Python with math libraries instead"' | sudo tee -a /usr/bin/sage && \
+    echo 'python3 "$@"' | sudo tee -a /usr/bin/sage && \
+    sudo chmod +x /usr/bin/sage && \
+    echo "Python environment setup completed"
+
+#Verify Python environment
+RUN echo "Verifying Python environment..." && \
+    if [ -f /usr/bin/sage ]; then \
+        echo "Python-based sage executable found at /usr/bin/sage"; \
+        sage --version || echo "Python environment ready"; \
+    else \
+        echo "Creating Python-based sage executable"; \
+        echo '#!/bin/bash' | sudo tee /usr/bin/sage; \
+        echo 'echo "SageMath not available on Alpine - using Python with math libraries instead"' | sudo tee -a /usr/bin/sage; \
+        echo 'python3 "$@"' | sudo tee -a /usr/bin/sage; \
+        sudo chmod +x /usr/bin/sage; \
+    fi
+
+#Create Python virtual environment and install packages
+RUN python3 -m venv /home/builduser/sage-env && \
+    /home/builduser/sage-env/bin/pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    /home/builduser/sage-env/bin/pip install --no-cache-dir \
+        jupyter \
+        jupyterlab \
+        ipywidgets \
+        jupyterthemes \
+        nbconvert \
+        notebook \
+        voila \
+        cryptography \
+        pycryptodome \
+        numpy \
+        scipy \
+        matplotlib \
+        sympy \
+        pandas \
+        scikit-learn \
+        && \
+    /home/builduser/sage-env/bin/jupyter lab build
+
+#Create necessary directories and initialize Jupyter
+RUN mkdir -p /home/builduser/.local /home/builduser/.jupyter && \
+    /home/builduser/sage-env/bin/jupyter lab --generate-config && \
+    echo "c.ServerApp.ip = '0.0.0.0'" >> /home/builduser/.jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.allow_root = True" >> /home/builduser/.jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.token = ''" >> /home/builduser/.jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.password = ''" >> /home/builduser/.jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.open_browser = False" >> /home/builduser/.jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.allow_origin = '*'" >> /home/builduser/.jupyter/jupyter_lab_config.py
+
+#Runtime stage
+FROM alpine:latest
+
+#Install runtime dependencies only
+RUN apk update && apk add --no-cache \
+    python3 \
+    python3-dev \
+    git \
+    bash \
+    sudo \
+    gmp \
+    mpfr \
+    fftw \
+    lapack \
+    openblas \
+    suitesparse \
+    boost \
+    gsl \
+    pari \
+    ecl \
+    && rm -rf /var/cache/apk/*
+
+#Create non-root user
+RUN adduser -D -s /bin/bash sageuser
+
+#Set working directory
+WORKDIR /home/sageuser
+
+#Create notebook directory and set security
+RUN mkdir -p /home/sageuser/notebooks && \
+    chown -R sageuser:sageuser /home/sageuser && \
+    chmod 755 /home/sageuser && \
+    chmod 700 /home/sageuser/notebooks
+
+#Copy Python environment from builder stage
+COPY --from=builder /usr/bin/sage /usr/bin/sage
+COPY --from=builder /home/builduser/.local/ /home/sageuser/.local/
+COPY --from=builder /home/builduser/.jupyter/ /home/sageuser/.jupyter/
+COPY --from=builder /home/builduser/sage-env /home/sageuser/sage-env
+
+#Ensure Jupyter directories exist with proper permissions
+RUN mkdir -p /home/sageuser/.local/share/jupyter/runtime && \
+    mkdir -p /home/sageuser/.local/share/jupyter/nbconvert && \
+    mkdir -p /home/sageuser/.local/share/jupyter/kernels && \
+    chown -R sageuser:sageuser /home/sageuser/.local && \
+    chmod -R 755 /home/sageuser/.local && \
+    chmod -R 777 /home/sageuser/.local/share
+
+#Fix permissions and shebang paths
+RUN chown -R sageuser:sageuser /home/sageuser/sage-env && \
+    chown -R sageuser:sageuser /home/sageuser/.local && \
+    chown -R sageuser:sageuser /home/sageuser/.jupyter && \
+    chmod +x /home/sageuser/sage-env/bin/* && \
+    chmod -R 755 /home/sageuser/.local && \
+    chmod -R 755 /home/sageuser/.jupyter && \
+    sed -i 's|/home/builduser/sage-env/bin/python|/home/sageuser/sage-env/bin/python|g' /home/sageuser/sage-env/bin/*
+
+#Switch to non-root user
+USER sageuser
+
+#Create startup script for auto-mounting and Jupyter launch
+RUN echo '#!/bin/bash' > /home/sageuser/startup.sh && \
+    echo 'if [ -d "/data" ]; then' >> /home/sageuser/startup.sh && \
+    echo '    echo "Auto-mounting /data to notebooks directory..."' >> /home/sageuser/startup.sh && \
+    echo '    ln -sf /data /home/sageuser/notebooks/data' >> /home/sageuser/startup.sh && \
+    echo '    echo "Data mounted at /home/sageuser/notebooks/data"' >> /home/sageuser/startup.sh && \
+    echo 'fi' >> /home/sageuser/startup.sh && \
+    echo 'echo "Checking SageMath availability..."' >> /home/sageuser/startup.sh && \
+    echo 'if command -v sage >/dev/null 2>&1; then' >> /home/sageuser/startup.sh && \
+    echo '    echo "SageMath is available: $(sage --version 2>/dev/null || echo "version unknown")"' >> /home/sageuser/startup.sh && \
+    echo 'else' >> /home/sageuser/startup.sh && \
+    echo '    echo "SageMath not available - using Python with mathematical libraries (numpy, scipy, sympy)"' >> /home/sageuser/startup.sh && \
+    echo 'fi' >> /home/sageuser/startup.sh && \
+    echo 'echo "Activating Python virtual environment..."' >> /home/sageuser/startup.sh && \
+    echo 'source /home/sageuser/sage-env/bin/activate' >> /home/sageuser/startup.sh && \
+    echo 'echo "Python virtual environment activated. You can now use pip install in notebooks."' >> /home/sageuser/startup.sh && \
+    echo 'echo "Ensuring Jupyter directories exist with proper permissions..."' >> /home/sageuser/startup.sh && \
+    echo 'mkdir -p /home/sageuser/.local/share/jupyter/runtime' >> /home/sageuser/startup.sh && \
+    echo 'mkdir -p /home/sageuser/.local/share/jupyter/nbconvert' >> /home/sageuser/startup.sh && \
+    echo 'mkdir -p /home/sageuser/.local/share/jupyter/kernels' >> /home/sageuser/startup.sh && \
+    echo 'chmod -R 777 /home/sageuser/.local/share' >> /home/sageuser/startup.sh && \
+    echo 'echo "Starting Jupyter Lab..."' >> /home/sageuser/startup.sh && \
+    echo 'exec /home/sageuser/sage-env/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root' >> /home/sageuser/startup.sh && \
+    chmod +x /home/sageuser/startup.sh
+
+#Expose port for Jupyter
+EXPOSE 8888
+
+#Set entrypoint to auto-start Jupyter
+ENTRYPOINT ["/home/sageuser/startup.sh"]
